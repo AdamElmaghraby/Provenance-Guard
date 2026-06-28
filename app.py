@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -6,7 +7,9 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 from audit_log import append_entry, get_recent_entries, init_db
+from scoring import attribution_from_confidence, combine_signal_scores
 from signal_groq import score_text_with_groq
+from signal_stylometric import score_text_with_stylometrics
 
 
 load_dotenv()
@@ -21,7 +24,7 @@ limiter = Limiter(
 init_db()
 
 
-def validate_submit_payload(payload: dict) -> tuple[bool, str]:
+def validate_submit_payload(payload: Any) -> tuple[bool, str]:
     if not isinstance(payload, dict):
         return False, "Request body must be a JSON object."
 
@@ -46,19 +49,11 @@ def validate_submit_payload(payload: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def temporary_attribution(score: float) -> str:
-    if score >= 0.81:
-        return "high_confidence_ai"
-    if score >= 0.61:
-        return "uncertain"
-    return "high_confidence_human"
-
-
-def temporary_label(attribution: str) -> str:
+def label_from_attribution(attribution: str) -> str:
     labels = {
-        "high_confidence_ai": "Provisional result: likely AI-generated (M3 single-signal mode).",
-        "uncertain": "Provisional result: uncertain attribution (M3 single-signal mode).",
-        "high_confidence_human": "Provisional result: likely human-written (M3 single-signal mode).",
+        "high_confidence_ai": "This content is likely AI-generated. Confidence is high based on semantic and structural analysis. You may submit an appeal if this is your original writing.",
+        "uncertain": "This result is uncertain. Signals are mixed, so no strong attribution was made. A manual review can be requested through appeal.",
+        "high_confidence_human": "This content is likely human-written. Confidence is high based on semantic and structural analysis.",
     }
     return labels[attribution]
 
@@ -72,13 +67,18 @@ def submit() -> tuple:
     if not is_valid:
         return jsonify({"error": error_message}), 400
 
+    # Type is guaranteed by validate_submit_payload.
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
     text = payload["text"]
     creator_id = payload["creator_id"]
 
     llm_score = score_text_with_groq(text)
-    confidence = llm_score
-    attribution = temporary_attribution(confidence)
-    label = temporary_label(attribution)
+    stylometric_score = score_text_with_stylometrics(text)
+    confidence = combine_signal_scores(llm_score, stylometric_score)
+    attribution = attribution_from_confidence(confidence)
+    label = label_from_attribution(attribution)
     content_id = str(uuid.uuid4())
 
     append_entry(
@@ -87,6 +87,7 @@ def submit() -> tuple:
         attribution=attribution,
         confidence=confidence,
         llm_score=llm_score,
+        stylometric_score=stylometric_score,
         status="classified",
     )
 

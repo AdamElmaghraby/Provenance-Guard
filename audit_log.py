@@ -24,10 +24,20 @@ def init_db() -> None:
                 attribution TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 llm_score REAL NOT NULL,
+                stylometric_score REAL NOT NULL DEFAULT 0.0,
                 status TEXT NOT NULL
             )
             """
         )
+
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()
+        }
+        if "stylometric_score" not in columns:
+            conn.execute(
+                "ALTER TABLE audit_log ADD COLUMN stylometric_score REAL NOT NULL DEFAULT 0.0"
+            )
 
 
 def append_entry(
@@ -37,6 +47,7 @@ def append_entry(
     attribution: str,
     confidence: float,
     llm_score: float,
+    stylometric_score: float,
     status: str = "classified",
 ) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -51,9 +62,10 @@ def append_entry(
                 attribution,
                 confidence,
                 llm_score,
+                stylometric_score,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 content_id,
@@ -62,6 +74,7 @@ def append_entry(
                 attribution,
                 confidence,
                 llm_score,
+                stylometric_score,
                 status,
             ),
         )
@@ -71,7 +84,7 @@ def get_recent_entries(limit: int = 50) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT content_id, creator_id, timestamp, attribution, confidence, llm_score, status
+            SELECT content_id, creator_id, timestamp, attribution, confidence, llm_score, stylometric_score, status
             FROM audit_log
             ORDER BY id DESC
             LIMIT ?
