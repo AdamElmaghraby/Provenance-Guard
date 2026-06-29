@@ -25,7 +25,8 @@ def init_db() -> None:
                 confidence REAL NOT NULL,
                 llm_score REAL NOT NULL,
                 stylometric_score REAL NOT NULL DEFAULT 0.0,
-                status TEXT NOT NULL
+                status TEXT NOT NULL,
+                appeal_reasoning TEXT
             )
             """
         )
@@ -38,6 +39,8 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE audit_log ADD COLUMN stylometric_score REAL NOT NULL DEFAULT 0.0"
             )
+        if "appeal_reasoning" not in columns:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN appeal_reasoning TEXT")
 
 
 def append_entry(
@@ -49,6 +52,7 @@ def append_entry(
     llm_score: float,
     stylometric_score: float,
     status: str = "classified",
+    appeal_reasoning: str | None = None,
 ) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -63,9 +67,10 @@ def append_entry(
                 confidence,
                 llm_score,
                 stylometric_score,
-                status
+                status,
+                appeal_reasoning
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 content_id,
@@ -76,15 +81,36 @@ def append_entry(
                 llm_score,
                 stylometric_score,
                 status,
+                appeal_reasoning,
             ),
         )
+
+
+def mark_under_review(content_id: str, creator_reasoning: str) -> bool:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM audit_log WHERE content_id = ? LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return False
+
+        conn.execute(
+            """
+            UPDATE audit_log
+            SET status = ?, appeal_reasoning = ?
+            WHERE content_id = ?
+            """,
+            ("under_review", creator_reasoning, content_id),
+        )
+    return True
 
 
 def get_recent_entries(limit: int = 50) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT content_id, creator_id, timestamp, attribution, confidence, llm_score, stylometric_score, status
+            SELECT content_id, creator_id, timestamp, attribution, confidence, llm_score, stylometric_score, status, appeal_reasoning
             FROM audit_log
             ORDER BY id DESC
             LIMIT ?

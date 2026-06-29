@@ -6,7 +6,7 @@ from flask import Flask, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-from audit_log import append_entry, get_recent_entries, init_db
+from audit_log import append_entry, get_recent_entries, init_db, mark_under_review
 from scoring import attribution_from_confidence, combine_signal_scores
 from signal_groq import score_text_with_groq
 from signal_stylometric import score_text_with_stylometrics
@@ -58,6 +58,30 @@ def label_from_attribution(attribution: str) -> str:
     return labels[attribution]
 
 
+def label_from_confidence(confidence: float) -> str:
+    attribution = attribution_from_confidence(confidence)
+    return label_from_attribution(attribution)
+
+
+def validate_appeal_payload(payload: Any) -> tuple[bool, str]:
+    if not isinstance(payload, dict):
+        return False, "Request body must be a JSON object."
+
+    content_id = payload.get("content_id")
+    creator_reasoning = payload.get("creator_reasoning")
+
+    if not content_id:
+        return False, "content_id is required."
+    if not creator_reasoning:
+        return False, "creator_reasoning is required."
+    if not isinstance(content_id, str):
+        return False, "content_id must be a string."
+    if not isinstance(creator_reasoning, str):
+        return False, "creator_reasoning must be a string."
+
+    return True, ""
+
+
 @app.post("/submit")
 @limiter.limit("100 per day")
 @limiter.limit("10 per minute")
@@ -78,7 +102,7 @@ def submit() -> tuple:
     stylometric_score = score_text_with_stylometrics(text)
     confidence = combine_signal_scores(llm_score, stylometric_score)
     attribution = attribution_from_confidence(confidence)
-    label = label_from_attribution(attribution)
+    label = label_from_confidence(confidence)
     content_id = str(uuid.uuid4())
 
     append_entry(
@@ -98,6 +122,38 @@ def submit() -> tuple:
                 "attribution": attribution,
                 "confidence": confidence,
                 "label": label,
+            }
+        ),
+        200,
+    )
+
+
+@app.post("/appeal")
+def appeal() -> tuple:
+    payload = request.get_json(silent=True)
+    is_valid, error_message = validate_appeal_payload(payload)
+    if not is_valid:
+        return jsonify({"error": error_message}), 400
+
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
+    content_id = payload["content_id"]
+    creator_reasoning = payload["creator_reasoning"]
+
+    updated = mark_under_review(
+        content_id=content_id,
+        creator_reasoning=creator_reasoning,
+    )
+    if not updated:
+        return jsonify({"error": "content_id not found."}), 404
+
+    return (
+        jsonify(
+            {
+                "message": "Appeal received successfully. Status updated to under_review.",
+                "content_id": content_id,
+                "status": "under_review",
             }
         ),
         200,
